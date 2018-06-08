@@ -5,6 +5,7 @@ from lxml import etree
 from filuet_log import filuet_log
 from dpd_settings import settings
 import win32api
+import os
 import srv
 
 
@@ -50,7 +51,7 @@ def process_start():
                 if 'status' in order_status and order_status['status'] == 'OK':
                     # get dpd label and save it
                     label_status, file_name = createLabelFile(
-                        order_status['orderNum'], order['cargoNumPack'])
+                        order_status['orderNum'], order['cargoNumPack'], order_code)
                     if 'status' in label_status:
                         win32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(
                             settings.print_command, file_name), '', 1)
@@ -145,24 +146,27 @@ def createLabelFile(dpd_order_num, label_qty, order_code):
     try:
         response = client2.service.createLabelFile(
             getLabelFile=dpdGetLabelFile)
-        pdf_data = response['file']
-
-        path_file = os.path.join(os.getcwd(), 'Labels')
-        os.makedirs(path_file, exist_ok=True)
-        file_name = os.path.join(
-            path_file, '{0}-{1}.pdf'.format(order_code, dpd_order_num))
-        log.INFO('Saving dpd label {0}'.format(file_name))
-        with open(file_name, 'wb') as f:
-            f.write(pdf_data)
-
         log.DEBUG('Request\n' +
                   etree.tounicode(history.last_sent['envelope'], pretty_print=True))
         log.DEBUG('Response\n' +
                   etree.tounicode(history.last_received['envelope'], pretty_print=True))
-        txt = ''
-        for r in response[0]:
-            txt += '{0} : {1}\n'.format(r, response[0][r])
-        log.INFO(txt[:-1])
+        if 'file' in response:
+            pdf_data = response['file']
+            path_file = os.path.join(os.getcwd(), 'Labels')
+            os.makedirs(path_file, exist_ok=True)
+            file_name = os.path.join(
+                path_file, '{0}-{1}.pdf'.format(order_code, dpd_order_num))
+            log.INFO('Saving dpd label {0}'.format(file_name))
+            with open(file_name, 'wb') as f:
+                f.write(pdf_data)
+            # log response
+            txt = ''
+            for r in response[0]:
+                txt += '{0} : {1}\n'.format(r, response[0][r])
+            log.INFO(txt[:-1])
+        else:
+            raise 'No PDF data found in response. Order %s', order_code
+
         return response[0], file_name
     except Exception as ex:
         log.ERROR('{0}'.format(ex))
@@ -289,4 +293,3 @@ if __name__ == '__main__':
         process_start()
         srv.upd_last_run()
         print(srv.last_run)
-    
