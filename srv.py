@@ -38,7 +38,7 @@ class srv:
                 while (self.last_run+timedelta(seconds=self.period_sec))>datetime.now() :
                     # print(datetime.now())
                     pass
-            else:
+            elif now.time() > self.end_time:
                 raise SystemExit
 
     def __execute_sql(self, sql):

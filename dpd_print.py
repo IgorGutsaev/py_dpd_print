@@ -29,10 +29,10 @@ def process_start():
     log.INFO('Start process!')
     # get new order for print
     order_code = get_new_order()
-    log.INFO('Order Packed: {}'.format(order_code))
 
     if len(order_code) > 0:
         # get order details
+        log.INFO('Order Packed: {}'.format(order_code))
         details = get_order_details(order_code)
         log.DEBUG('details:\n' + str(details))
 
@@ -41,20 +41,26 @@ def process_start():
             order = init_order(order_code, details)
             log.DEBUG('order:\n' + str(order))
             if order is not None:
-                # register order in dpd
-                order_status = dict()
-                order_status = createOrder(**order)
-                order_status['pack_date'] = details['ExecuteDate']
-                order_status['ship_date'] = order['datePickup']
-                log.DEBUG('order_status:\n' + str(order_status))
-                update_order_status(order_code, order_status)
-                if 'status' in order_status and order_status['status'] == 'OK':
-                    # get dpd label and save it
-                    label_status, file_name = createLabelFile(
-                        order_status['orderNum'], order['cargoNumPack'], order_code)
-                    if 'status' in label_status:
-                        win32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(
-                            settings.print_command, file_name), '', 1)
+                try:
+                    # register order in dpd
+                    order_status = dict()
+                    order_status = createOrder(**order)
+                    order_status['pack_date'] = details['ExecuteDate']
+                    order_status['ship_date'] = order['datePickup']
+                    log.DEBUG('order_status:\n' + str(order_status))
+                    update_order_status(order_code, order_status)
+                    if 'status' in order_status and order_status['status'] == 'OK':
+                        # get dpd label and save it
+                        label_status, file_name = createLabelFile(
+                            order_status['orderNum'], order['cargoNumPack'], order_code)
+                        if 'status' in label_status:
+                            win32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(
+                                settings.print_command, file_name), '', 1)
+                            log.INFO('File printed: {0}'.format(file_name))
+                            sql = "UPDATE [dbo].[dpd_orders] SET [printed] = 1 WHERE order_code = '{0}'".format(order_code)
+                            execute_sql(sql)
+                except Exception as ex:
+                    log.ERROR('{0}'.format(ex))
 
 
 def update_order_status(order_code, order_status):
@@ -161,13 +167,13 @@ def createLabelFile(dpd_order_num, label_qty, order_code):
                 f.write(pdf_data)
             # log response
             txt = ''
-            for r in response[0]:
-                txt += '{0} : {1}\n'.format(r, response[0][r])
+            for r in response['order'][0]:
+                txt += '{0} : {1}\n'.format(r, response['order'][0][r])
             log.INFO(txt[:-1])
         else:
-            raise 'No PDF data found in response. Order %s', order_code
+            raise 'No PDF data found in response. Order {0}'.format(order_code)
 
-        return response[0], file_name
+        return response['order'][0], file_name
     except Exception as ex:
         log.ERROR('{0}'.format(ex))
         return None, ''
@@ -292,4 +298,4 @@ if __name__ == '__main__':
         srv.next_run()
         process_start()
         srv.upd_last_run()
-        print(srv.last_run)
+        # print(srv.last_run)
