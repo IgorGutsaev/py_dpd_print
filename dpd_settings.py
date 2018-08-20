@@ -5,9 +5,12 @@ class settings:
     clientKey = '1F9A998B47EFA546C081F99C99A1E0F57E9F103F'
 
     # set 1
-    wsdl1 = 'http://wstest.dpd.ru/services/order2?wsdl'
+    # wsdl1 = 'http://wstest.dpd.ru/services/order2?wsdl' # test env
+    wsdl1 = 'http://ws.dpd.ru/services/order2?wsdl' # prod env
+
     # set 2
-    wsdl2 = 'http://wstest.dpd.ru/services/label-print?wsdl'
+    # wsdl2 = 'http://wstest.dpd.ru/services/label-print?wsdl' # test env
+    wsdl2 = 'http://ws.dpd.ru/services/label-print?wsdl' # prod env
 
 
     # createOrder

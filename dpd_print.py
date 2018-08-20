@@ -30,7 +30,7 @@ def process_start():
     # get new order for print
     order_code = get_new_order()
 
-    if len(order_code) > 0:
+    if order_code:
         # get order details
         log.INFO('Order Packed: {}'.format(order_code))
         details = get_order_details(order_code)
@@ -40,7 +40,7 @@ def process_start():
         if len(details) > 0:
             order = init_order(order_code, details)
             log.DEBUG('order:\n' + str(order))
-            if order is not None:
+            if order:
                 try:
                     # register order in dpd
                     order_status = dict()
@@ -54,8 +54,7 @@ def process_start():
                         label_status, file_name = createLabelFile(
                             order_status['orderNum'], order['cargoNumPack'], order_code)
                         if 'status' in label_status:
-                            win32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(
-                                settings.print_command, file_name), '', 1)
+                            vwin32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(settings.print_command, file_name), '', 1)
                             log.INFO('File printed: {0}'.format(file_name))
                             sql = "UPDATE [dbo].[dpd_orders] SET [printed] = 1 WHERE order_code = '{0}'".format(order_code)
                             execute_sql(sql)
@@ -71,7 +70,12 @@ def update_order_status(order_code, order_status):
                     @error_msg = N'{2}',
                     @dpd_id = N'{3}',
                     @pack_date = N'{4}',
-                    @ship_date = N'{5}';'''.format(order_code, order_status['status'], order_status['errorMessage'], order_status['orderNum'], order_status['pack_date'].isoformat(timespec='seconds'), order_status['ship_date'])
+                    @ship_date = N'{5}';'''.format(order_code, 
+                                                    order_status['status'], 
+                                                    order_status['errorMessage'], 
+                                                    order_status['orderNum'], 
+                                                    order_status['pack_date'].isoformat(timespec='seconds'), 
+                                                    order_status['ship_date'])
     else:
         sql = '''EXEC [dpd].[update_order_status]
             @order_code = N'{0}',
@@ -83,25 +87,57 @@ def update_order_status(order_code, order_status):
 
 
 def init_order(order_code, details):
-    ''' structure of received data:
-    {'Type': 23, 'InputDate': datetime.datetime(2018, 5, 7, 3, 1, 26), 'ExecuteDate': datetime.datetime(2018, 5, 8, 7, 12, 9, 260000), 'Status': 'Упакован', 'StatusCode': '60', 'BoxQty': 1, 'TotalWeight': Decimal('0.820000'), 'ReceiverName': 'АРСЕНЬЕВА А.Б.', 'TerminalNo': 'MQ23', 'Phone': '89639262357', 'AddressLV': 'Д. 28А КОМСОМОЛЬСКАЯ УЛ.', 'AreaLV': 'МОСКОВСКАЯ ОБЛАСТЬ', 'CityLV': 'НОГИНСК', 'PostIndexLV': '142400', 'Region': None, 'Region_type': None, 'District': None, 'District_type': None, 'City': None, 'City_type': None, 'Place': None, 'Place_type': None, 'Street': None, 'Street_type': None, 'House': None, 'House_type': None, 'Building': None, 'Building_type': None, 'Structure': None, 'Structure_type': None,
-    'Flat': None, 'Flat_type': None, 'Zip': None, 'Pretty': None, 'Precision': None, 'Recall': None, 'Warnings': None, 'FIAS_City': None}'''
+    ''' create order datatype from details'''
+    ''' 
+    structure of received data:
+    {'Type': 23, 'InputDate': datetime.datetime(2018, 5, 7, 3, 1, 26), 'ExecuteDate': datetime.datetime(2018, 5, 8, 7, 12, 9, 260000), 'Status': 'Упакован', 'StatusCode': '60', 'BoxQty': 1,
+    'TotalWeight': Decimal('0.820000'), 'ReceiverName': 'АРСЕНЬЕВА А.Б.', 'TerminalNo': 'MQ23', 'Phone': '89639262357', 'AddressLV': 'Д. 28А КОМСОМОЛЬСКАЯ УЛ.', 'AreaLV': 'МОСКОВСКАЯ ОБЛАСТЬ',
+    'CityLV': 'НОГИНСК', 'PostIndexLV': '142400', 'Region': None, 'Region_type': None, 'District': None, 'District_type': None, 'City': None, 'City_type': None, 'Place': None, 'Place_type': None,
+    'Street': None, 'Street_type': None, 'House': None, 'House_type': None, 'Building': None, 'Building_type': None, 'Structure': None, 'Structure_type': None,
+    'Flat': None, 'Flat_type': None, 'Zip': None, 'Pretty': None, 'Precision': None, 'Recall': None, 'Warnings': None, 'FIAS_City': None}
+
+    ns0:address( house: xsd:string, houseKorpus: xsd:string, str: xsd:string, vlad: xsd:string, extraInfo: xsd:string, office: xsd:string, flat: xsd:string, workTimeFrom: xsd:string, workTimeTo: xsd:string, dinnerTimeFrom: xsd:string, dinnerTimeTo: xsd:string, contactFio: xsd:string, contactPhone: xsd:string, contactEmail: xsd:string, instructions: xsd:string, needPass: xsd:boolean)
+     
+    '''
     try:
+        order = dict()
+
         # check if terminal number exist
-        if len(details['TerminalNo']) > 0:
-            order = dict()
-            order['datePickup'] = get_pick_date()
-            order['orderNumberInternal'] = order_code
-            order['cargoNumPack'] = details['BoxQty']
-            order['cargoWeight'] = details['TotalWeight']
+        if details['TerminalNo']:
+            # terminal
             address = factory1.address(terminalCode=details['TerminalNo'],
                                        name=details['ReceiverName'],
                                        contactFio=details['ReceiverName'],
                                        contactPhone=details['Phone'])
-            order['receiverAddress'] = address
-            return order
+            order['serviceVariant'] = 'ДТ'
         else:
-            return None
+            # home address
+            address = factory1.address(flat=details['Flat'] if details['Flat'] else '',
+                                       str=details['Structure_type'] + ' ' +
+                                       details['Structure'] if details['Structure'] else '',
+                                       houseKorpus=details['Building'] if details['Building'] else '',
+                                       house=details['House'] if details['House'] else '',
+                                       streetAbbr=details['Street_type'],
+                                       street=details['Street'],
+                                       city=details['City_type'] + ' ' +
+                                       details['City'] if details['City'] else details['Place_type'] +
+                                       ' ' + details['Place'],
+                                       region=details['Region'] +
+                                       ' ' + details['Region_type'],
+                                       index=details['Zip'],
+                                       countryName='Россия',
+                                       name=details['ReceiverName'],
+                                       contactFio=details['ReceiverName'],
+                                       contactPhone=details['Phone'])
+            order['serviceVariant'] = 'ДД'
+        
+        order['datePickup'] = get_pick_date()
+        order['orderNumberInternal'] = order_code
+        order['cargoNumPack'] = details['BoxQty']
+        order['cargoWeight'] = details['TotalWeight']
+        order['receiverAddress'] = address
+
+        return order
     except Exception as ex:
         log.ERROR('{0}'.format(ex))
         return None
@@ -207,8 +243,10 @@ def createOrder(datePickup,
                 orderNumberInternal,
                 cargoNumPack,
                 cargoWeight,
-                receiverAddress):
-    ''' register new order in dpd server, use set 1
+                receiverAddress,
+                serviceVariant):
+    ''' register new order in dpd server, use set 1 '''
+    '''
     ns0:createOrder(orders: ns0:dpdOrdersData)
     ns0:dpdOrdersData(auth: ns0:auth, header: ns0:header, order: ns0:order[])
     ns0:header(datePickup: xsd:date, payer: xsd:long, senderAddress: ns0:address, pickupTimePeriod: xsd:string, regularNum: xsd:string)
@@ -227,9 +265,9 @@ def createOrder(datePickup,
         cargoNumPack = cargoNumPack  # количество мест
         cargoWeight = cargoWeight  # Вес отправки, кг
         receiverAddress = receiverAddress
+        serviceCode = settings.serviceCode  # settings.serviceCode
 
-        serviceCode = settings.serviceCode
-        serviceVariant = settings.serviceVariant
+        serviceVariant = serviceVariant
         cargoRegistered = settings.cargoRegistered  # Ценный груз
         cargoValue = settings.cargoValue  # Сумма объявленной ценности
         cargoCategory = settings.cargoCategory  # Содержимое отправки
@@ -293,9 +331,12 @@ def execute_sql_fetch(sql):
 
 
 if __name__ == '__main__':
+    # process_start()
+
     srv = srv.srv('DPD_PRINT')
     while True:
         srv.next_run()
         process_start()
         srv.upd_last_run()
+    
         # print(srv.last_run)
