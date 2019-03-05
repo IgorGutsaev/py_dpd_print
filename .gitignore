@@ -31,3 +31,8 @@ _ReSharper*/
 #Nuget packages folder
 packages/
 /__pycache__/*
+Labels/*
+.pdf
+
+Old files/*
+Labels/*

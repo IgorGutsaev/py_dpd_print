@@ -2,16 +2,18 @@ from zeep import Client
 from zeep.plugins import HistoryPlugin
 import pyodbc
 from lxml import etree
-from filuet_log import filuet_log
 from dpd_settings import settings
 import win32api
 import os
 import srv
+import logging
+from logging.handlers import RotatingFileHandler
+import datetime
+
 
 
 # declare global variables
 history = HistoryPlugin()
-log = filuet_log(app_name='DPD_PRINT')
 
 # set 1
 client1 = Client(wsdl=settings.wsdl1, plugins=[history])
@@ -25,21 +27,33 @@ auth2 = factory2.auth(clientNumber=settings.clientNumber,
                       clientKey=settings.clientKey)
 
 
+def init_logger():
+    ''' init logger with unicode support '''
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(
+        filename='dpd_print.log', maxBytes=5000000, backupCount=1, encoding='utf-8')
+    formatter = logging.Formatter(
+        '%(asctime)s %(levelname)s\t%(funcName)s() <%(lineno)s> %(message)s')
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
+
+
 def process_start():
-    log.INFO('Start process!')
+    logging.debug('Start process!')
     # get new order for print
     order_code = get_new_order()
 
     if order_code:
         # get order details
-        log.INFO('Order Packed: {}'.format(order_code))
         details = get_order_details(order_code)
-        log.DEBUG('details:\n' + str(details))
+        logging.info('Order Packed: {}'.format(order_code))
+        logging.debug('details:\n' + str(details))
 
         # create dict for order
         if len(details) > 0:
             order = init_order(order_code, details)
-            log.DEBUG('order:\n' + str(order))
+            logging.debug('order:\n' + str(order))
             if order:
                 try:
                     # register order in dpd
@@ -47,19 +61,72 @@ def process_start():
                     order_status = createOrder(**order)
                     order_status['pack_date'] = details['ExecuteDate']
                     order_status['ship_date'] = order['datePickup']
-                    log.DEBUG('order_status:\n' + str(order_status))
                     update_order_status(order_code, order_status)
+                    logging.debug('order_status:\n' + str(order_status))
                     if 'status' in order_status and order_status['status'] == 'OK':
                         # get dpd label and save it
-                        label_status, file_name = createLabelFile(
-                            order_status['orderNum'], order['cargoNumPack'], order_code)
-                        if 'status' in label_status:
-                            vwin32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(settings.print_command, file_name), '', 1)
-                            log.INFO('File printed: {0}'.format(file_name))
-                            sql = "UPDATE [dbo].[dpd_orders] SET [printed] = 1 WHERE order_code = '{0}'".format(order_code)
-                            execute_sql(sql)
+                        resp = createLabelFile(order_status['orderNum'], order['cargoNumPack'])
+
+                        if 'file' in resp:
+                            print_label(resp, order_code, order_status['orderNum'])
+                        else:
+                            raise 'No PDF data found in response. Order {0}'.format(order_code)
                 except Exception as ex:
-                    log.ERROR('{0}'.format(ex))
+                    logging.error('{0}'.format(ex))
+
+
+def createLabelFile(dpd_order_num, label_qty):
+    ''' get label for print in PDF format, use set 2 '''
+    # createLabelFile(getLabelFile: ns0:dpdGetLabelFile) -> return: ns0:dpdOrderLabelsFile
+    # ns0:dpdGetLabelFile(auth: ns0:auth, fileFormat: ns0:fileFormat, pageSize: ns0:pageSize, order: ns0:orderParam[])
+    # ns0:orderParam(orderNum: xsd:string, parcelsNumber: xsd:int)
+    # ns0:auth(clientNumber: xsd:long, clientKey: xsd:string)
+    # ns0:createLabelFileResponse(return: ns0:dpdOrderLabelsFile)
+    try:
+        order = factory2.orderParam(
+            orderNum=dpd_order_num, parcelsNumber=label_qty)
+        dpdGetLabelFile = factory2.dpdGetLabelFile(
+            auth=auth2, fileFormat='PDF', pageSize='A6', order=[order])   
+        response = client2.service.createLabelFile(
+            getLabelFile=dpdGetLabelFile)
+        return response
+    except Exception as ex:
+        logging.error('{0}'.format(ex))
+
+
+def print_label(response, order_code, dpd_order_num):
+    try:
+        pdf_data = response['file']
+        path_file = os.path.join(os.getcwd(), 'Labels')
+        os.makedirs(path_file, exist_ok=True)
+        file_name = os.path.join(
+            path_file, '{0}-{1}.pdf'.format(order_code, dpd_order_num))
+        logging.info('Saving dpd label {0}'.format(file_name))
+        with open(file_name, 'wb') as f:
+            f.write(pdf_data)
+        if 'status' in response['order'][0]:
+            win32api.ShellExecute(0, 'open', settings.print_app, '{0} {1}'.format(
+                settings.print_command, file_name), '', 1)
+            logging.info('File printed: {0}'.format(file_name))
+            sql = "UPDATE [dbo].[dpd_orders] SET [printed] = 1 WHERE order_code = '{0}'".format(
+                order_code)
+            execute_sql(sql)
+            delete_old_files(path_file)
+    except Exception as ex:
+        logging.error('{0}'.format(ex))
+
+
+def delete_old_files(path_file):
+    max_date = datetime.datetime.now() - datetime.timedelta(days=0, seconds=0, microseconds=0,
+                                                            milliseconds=0, minutes=10, hours=0, weeks=0)
+    files = os.listdir(path_file)
+    for _t1 in files:
+        path_to_file = os.path.join(path_file, _t1)
+        if datetime.datetime.fromtimestamp(os.path.getctime(path_to_file)) < max_date:
+            try:
+                os.remove(path_to_file)
+            except Exception as ex:
+                logging.error('{0}'.format(ex))
 
 
 def update_order_status(order_code, order_status):
@@ -70,12 +137,13 @@ def update_order_status(order_code, order_status):
                     @error_msg = N'{2}',
                     @dpd_id = N'{3}',
                     @pack_date = N'{4}',
-                    @ship_date = N'{5}';'''.format(order_code, 
-                                                    order_status['status'], 
-                                                    order_status['errorMessage'], 
-                                                    order_status['orderNum'], 
-                                                    order_status['pack_date'].isoformat(timespec='seconds'), 
-                                                    order_status['ship_date'])
+                    @ship_date = N'{5}';'''.format(order_code,
+                                                   order_status['status'],
+                                                   order_status['errorMessage'],
+                                                   order_status['orderNum'],
+                                                   order_status['pack_date'].isoformat(
+                                                       timespec='seconds'),
+                                                   order_status['ship_date'])
     else:
         sql = '''EXEC [dpd].[update_order_status]
             @order_code = N'{0}',
@@ -130,7 +198,7 @@ def init_order(order_code, details):
                                        contactFio=details['ReceiverName'],
                                        contactPhone=details['Phone'])
             order['serviceVariant'] = 'ДД'
-        
+
         order['datePickup'] = get_pick_date()
         order['orderNumberInternal'] = order_code
         order['cargoNumPack'] = details['BoxQty']
@@ -139,7 +207,7 @@ def init_order(order_code, details):
 
         return order
     except Exception as ex:
-        log.ERROR('{0}'.format(ex))
+        logging.error('{0}'.format(ex))
         return None
 
 
@@ -173,49 +241,7 @@ def get_new_order():
         return ''
 
 
-def createLabelFile(dpd_order_num, label_qty, order_code):
-    ''' get label for print in PDF format, use set 2 '''
-    # createLabelFile(getLabelFile: ns0:dpdGetLabelFile) -> return: ns0:dpdOrderLabelsFile
-    # ns0:dpdGetLabelFile(auth: ns0:auth, fileFormat: ns0:fileFormat, pageSize: ns0:pageSize, order: ns0:orderParam[])
-    # ns0:orderParam(orderNum: xsd:string, parcelsNumber: xsd:int)
-    # ns0:auth(clientNumber: xsd:long, clientKey: xsd:string)
-    # ns0:createLabelFileResponse(return: ns0:dpdOrderLabelsFile)
-
-    order = factory2.orderParam(
-        orderNum=dpd_order_num, parcelsNumber=label_qty)
-    dpdGetLabelFile = factory2.dpdGetLabelFile(
-        auth=auth2, fileFormat='PDF', pageSize='A6', order=[order])
-    try:
-        response = client2.service.createLabelFile(
-            getLabelFile=dpdGetLabelFile)
-        log.DEBUG('Request\n' +
-                  etree.tounicode(history.last_sent['envelope'], pretty_print=True))
-        log.DEBUG('Response\n' +
-                  etree.tounicode(history.last_received['envelope'], pretty_print=True))
-        if 'file' in response:
-            pdf_data = response['file']
-            path_file = os.path.join(os.getcwd(), 'Labels')
-            os.makedirs(path_file, exist_ok=True)
-            file_name = os.path.join(
-                path_file, '{0}-{1}.pdf'.format(order_code, dpd_order_num))
-            log.INFO('Saving dpd label {0}'.format(file_name))
-            with open(file_name, 'wb') as f:
-                f.write(pdf_data)
-            # log response
-            txt = ''
-            for r in response['order'][0]:
-                txt += '{0} : {1}\n'.format(r, response['order'][0][r])
-            log.INFO(txt[:-1])
-        else:
-            raise 'No PDF data found in response. Order {0}'.format(order_code)
-
-        return response['order'][0], file_name
-    except Exception as ex:
-        log.ERROR('{0}'.format(ex))
-        return None, ''
-
-
-def dpdGetOrderStatus(order_no):
+def dpdGetOrderStatus(order_no):  # not used
     ''' get status of submited order, use set 1 '''
     # ns0:getOrderStatus(orderStatus: ns0:dpdGetOrderStatus)
     # ns0:dpdGetOrderStatus(auth: ns0:auth, order: ns0:internalOrderNumber[])
@@ -226,15 +252,10 @@ def dpdGetOrderStatus(order_no):
     try:
         response = client1.service.getOrderStatus(
             orderStatus=dpdGetOrderStatus)
-        print('Request\n' +
-              etree.tounicode(history.last_sent['envelope'], pretty_print=True))
-        print('Response\n' +
-              etree.tounicode(history.last_received['envelope'], pretty_print=True))
-        print(response[0]['status'])
-        print(response[0]['errorMessage'])
-        print(response[0]['orderNumberInternal'])
-        print(response[0]['orderNum'])
-        pass
+        logging.info('Request\n' +
+                     etree.tounicode(history.last_sent['envelope'], pretty_print=True))
+        logging.info('Response\n' +
+                     etree.tounicode(history.last_received['envelope'], pretty_print=True))
     except Exception as ex:
         print('{0}'.format(ex))
 
@@ -261,13 +282,13 @@ def createOrder(datePickup,
                                  pickupTimePeriod=settings.pickupTimePeriod, senderAddress=senderAddress)
 
         # order
-        orderNumberInternal = orderNumberInternal  # 'Test01'
-        cargoNumPack = cargoNumPack  # количество мест
-        cargoWeight = cargoWeight  # Вес отправки, кг
-        receiverAddress = receiverAddress
-        serviceCode = settings.serviceCode  # settings.serviceCode
+        # orderNumberInternal = orderNumberInternal  # 'Test01'
+        # cargoNumPack = cargoNumPack  # количество мест
+        # cargoWeight = cargoWeight  # Вес отправки, кг
+        # receiverAddress = receiverAddress
+        # serviceVariant = serviceVariant
 
-        serviceVariant = serviceVariant
+        serviceCode = settings.serviceCode  # settings.serviceCode
         cargoRegistered = settings.cargoRegistered  # Ценный груз
         cargoValue = settings.cargoValue  # Сумма объявленной ценности
         cargoCategory = settings.cargoCategory  # Содержимое отправки
@@ -285,23 +306,19 @@ def createOrder(datePickup,
             auth=auth1, header=header, order=[order])
 
         response = client1.service.createOrder(orders=orders)
-        log.DEBUG('Request\n' +
-                  etree.tounicode(history.last_sent['envelope'], pretty_print=True))
-        log.DEBUG('Response\n' +
-                  etree.tounicode(history.last_received['envelope'], pretty_print=True))
-        txt = ''
-        for r in response[0]:
-            txt += '{0} : {1}\n'.format(r, response[0][r])
-        log.INFO(txt[:-1])
+        logging.info('Request\n' +
+                     etree.tounicode(history.last_sent['envelope'], pretty_print=True))
+        logging.info('Response\n' +
+                     etree.tounicode(history.last_received['envelope'], pretty_print=True))
         return response[0]
     except Exception as ex:
-        log.ERROR('{0}'.format(ex))
+        logging.error('{0}'.format(ex))
         return None
 
 
 def execute_sql(sql):
     ''' execute sql command on db '''
-    log.DEBUG(sql)
+    logging.debug(sql)
     try:
         with pyodbc.connect(settings.conn_str) as conn:
             cursor = conn.cursor()
@@ -309,13 +326,13 @@ def execute_sql(sql):
             cursor.commit()
             return 1
     except Exception as ex:
-        log.ERROR('{0}'.format(ex))
+        logging.error('{0}'.format(ex))
         return None
 
 
 def execute_sql_fetch(sql):
     ''' execute sql command on db '''
-    log.DEBUG(sql)
+    logging.debug(sql)
     try:
         with pyodbc.connect(settings.conn_str) as conn:
             cursor = conn.cursor()
@@ -326,11 +343,12 @@ def execute_sql_fetch(sql):
             cursor.commit()
             return table
     except Exception as ex:
-        log.ERROR('{0}'.format(ex))
+        logging.error('{0}'.format(ex))
         return None
 
 
 if __name__ == '__main__':
+    init_logger()
     # process_start()
 
     srv = srv.srv('DPD_PRINT')
@@ -338,5 +356,5 @@ if __name__ == '__main__':
         srv.next_run()
         process_start()
         srv.upd_last_run()
-    
+
         # print(srv.last_run)
